@@ -23,7 +23,7 @@ app.get('/', (req, res) => {
   res.send('API de Asistente Legal funcionando correctamente.');
 });
 
-// ENDPOINT: Listar expedientes del despacho para el usuario final
+// ENDPOINT: Listar expedientes del despacho
 app.get('/api/listar-expedientes', async (req, res) => {
   try {
     const { organizacionId, organizacion_id } = req.query;
@@ -60,7 +60,7 @@ app.get('/api/listar-expedientes', async (req, res) => {
   }
 });
 
-// ENDPOINT: Procesar Notificación Judicial con Gemini (con Fallback Automático)
+// ENDPOINT: Procesar Notificación Judicial con Gemini
 app.post('/api/procesar-providencia', async (req, res) => {
   try {
     const { textoNotificacion, organizacionId, organizacion_id } = req.body;
@@ -98,23 +98,35 @@ app.post('/api/procesar-providencia', async (req, res) => {
     };
 
     let jsonIa = null;
-    const modelos = ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-2.5-pro'];
+    const modelos = ['gemini-3.8-flash', 'gemini-3.1-pro-preview'];
 
     for (const modelo of modelos) {
       try {
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent?key=${GEMINI_API_KEY}`;
-        const resp = await fetch(url, {
+        let resp = await fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(geminiPayload)
         });
 
-        const data = await resp.json();
+        let data = await resp.json();
+
+        if (data.error && data.error.message && data.error.message.includes('high demand')) {
+          console.warn(`Aviso: ${modelo} saturado temporalmente. Esperando 2s antes de reintentar...`);
+          await new Promise(r => setTimeout(r, 2000));
+          resp = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(geminiPayload)
+          });
+          data = await resp.json();
+        }
+
         if (!data.error && data.candidates?.[0]?.content?.parts?.[0]?.text) {
           jsonIa = data;
           break;
         }
-        console.warn(`Aviso: ${modelo} no respondió con éxito, intentando siguiente modelo...`, data.error?.message);
+        console.warn(`Aviso: ${modelo} no respondió con éxito:`, data.error?.message);
       } catch (errLoop) {
         console.warn(`Error de red con ${modelo}:`, errLoop.message);
       }
@@ -126,6 +138,7 @@ app.post('/api/procesar-providencia', async (req, res) => {
 
     const datosExtraidos = JSON.parse(jsonIa.candidates[0].content.parts[0].text);
 
+    // Coincidencias existentes
     let coincidencias = [];
     const soloDigitos = (datosExtraidos.numProceso || '').replace(/\D/g, '');
 
@@ -173,7 +186,7 @@ app.post('/api/procesar-providencia', async (req, res) => {
   }
 });
 
-// ENDPOINT: Guardar o actualizar expediente
+// ENDPOINT: Guardar expediente
 app.post('/api/guardar-expediente', async (req, res) => {
   try {
     if (!supabase) return res.status(500).json({ error: 'Base de datos no configurada.' });
