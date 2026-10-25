@@ -28,7 +28,7 @@ app.post('/api/procesar-providencia', async (req, res) => {
     }
 
     // 1. Extraer datos con Gemini Flash usando responseSchema estricto
-    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${GEMINI_API_KEY}`;
     
     const geminiPayload = {
       contents: [{
