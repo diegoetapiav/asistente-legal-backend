@@ -100,7 +100,6 @@ app.post('/api/procesar-providencia', async (req, res) => {
     let jsonIa = null;
     const modelos = ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-2.5-pro'];
 
-    // Intento en cascada: si un modelo está congestionado, pasa al siguiente
     for (const modelo of modelos) {
       try {
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent?key=${GEMINI_API_KEY}`;
@@ -113,9 +112,130 @@ app.post('/api/procesar-providencia', async (req, res) => {
         const data = await resp.json();
         if (!data.error && data.candidates?.[0]?.content?.parts?.[0]?.text) {
           jsonIa = data;
-          break; // Respuesta exitosa obtenida
+          break;
         }
         console.warn(`Aviso: ${modelo} no respondió con éxito, intentando siguiente modelo...`, data.error?.message);
       } catch (errLoop) {
         console.warn(`Error de red con ${modelo}:`, errLoop.message);
       }
+    }
+
+    if (!jsonIa || !jsonIa.candidates?.[0]?.content?.parts?.[0]?.text) {
+      throw new Error("No fue posible obtener respuesta de Gemini en este momento. Por favor reintenta.");
+    }
+
+    const datosExtraidos = JSON.parse(jsonIa.candidates[0].content.parts[0].text);
+
+    let coincidencias = [];
+    const soloDigitos = (datosExtraidos.numProceso || '').replace(/\D/g, '');
+
+    if (soloDigitos.length >= 4) {
+      const { data: expedientesExistentes } = await supabase
+        .from('expedientes')
+        .select('id, num_proceso, cliente, contraparte, materia, tipo_proceso')
+        .eq('organizacion_id', orgId);
+
+      if (expedientesExistentes) {
+        coincidencias = expedientesExistentes.filter(exp => {
+          const numLimpio = String(exp.num_proceso || '').replace(/\D/g, '');
+          return numLimpio && (numLimpio === soloDigitos || numLimpio.includes(soloDigitos));
+        });
+      }
+    }
+
+    const { data: listaExpedientes } = await supabase
+      .from('expedientes')
+      .select('cliente, contraparte')
+      .eq('organizacion_id', orgId);
+
+    const { data: listaResponsables } = await supabase
+      .from('usuarios')
+      .select('id, nombre_completo')
+      .eq('organizacion_id', orgId);
+
+    const partesSet = new Set();
+    listaExpedientes?.forEach(e => {
+      if (e.cliente) partesSet.add(e.cliente);
+      if (e.contraparte) partesSet.add(e.contraparte);
+    });
+
+    return res.status(200).json({
+      datosIA: datosExtraidos,
+      coincidencias: coincidencias,
+      listas: {
+        partes: Array.from(partesSet).sort(),
+        responsables: listaResponsables || []
+      }
+    });
+
+  } catch (error) {
+    return res.status(500).json({ error: error.message || 'Error al procesar la providencia.' });
+  }
+});
+
+// ENDPOINT: Guardar o actualizar expediente
+app.post('/api/guardar-expediente', async (req, res) => {
+  try {
+    if (!supabase) return res.status(500).json({ error: 'Base de datos no configurada.' });
+
+    const { 
+      expedienteId, 
+      organizacionId, 
+      organizacion_id, 
+      materia, 
+      numProceso, 
+      cliente, 
+      contraparte, 
+      tipoProceso, 
+      estado, 
+      proximasAcciones, 
+      responsableId 
+    } = req.body;
+
+    const orgId = organizacionId || organizacion_id;
+
+    if (expedienteId) {
+      const { error } = await supabase
+        .from('expedientes')
+        .update({
+          materia,
+          cliente,
+          contraparte,
+          tipo_proceso: tipoProceso,
+          estado_actual: estado,
+          proximas_acciones: proximasAcciones,
+          responsable_id: responsableId || null,
+          actualizado_en: new Date()
+        })
+        .eq('id', expedienteId)
+        .eq('organizacion_id', orgId);
+
+      if (error) throw error;
+      return res.status(200).json({ mensaje: 'Expediente actualizado exitosamente.' });
+    } else {
+      const { error } = await supabase
+        .from('expedientes')
+        .insert([{
+          organizacion_id: orgId,
+          materia,
+          num_proceso: numProceso,
+          cliente,
+          contraparte,
+          tipo_proceso: tipoProceso,
+          estado_actual: estado,
+          proximas_acciones: proximasAcciones,
+          responsable_id: responsableId || null
+        }]);
+
+      if (error) throw error;
+      return res.status(200).json({ mensaje: 'Nuevo expediente registrado exitosamente.' });
+    }
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Servidor escuchando en el puerto ${PORT}`);
+});
