@@ -6,28 +6,70 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Variables de entorno cargadas desde el panel de despliegue
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+  console.warn('ADVERTENCIA: Credenciales de Supabase incompletas.');
+}
 
-// RUTA DE PRUEBA: Verificar que el servidor esté vivo
+const supabase = (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY) 
+  ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY) 
+  : null;
+
+// RUTA DE PRUEBA
 app.get('/', (req, res) => {
   res.send('API de Asistente Legal funcionando correctamente.');
 });
 
-// ENDPOINT PRINCIPAL: Procesar Notificación Judicial
+// NUEVO ENDPOINT: Listar expedientes del despacho para el usuario final
+app.get('/api/listar-expedientes', async (req, res) => {
+  try {
+    const { organizacionId } = req.query;
+    if (!organizacionId) {
+      return res.status(400).json({ error: 'Falta el parámetro organizacionId.' });
+    }
+
+    if (!supabase) return res.status(500).json({ error: 'Base de datos no conectada.' });
+
+    const { data, error } = await supabase
+      .from('expedientes')
+      .select(`
+        id,
+        materia,
+        num_proceso,
+        cliente,
+        contraparte,
+        tipo_proceso,
+        estado_actual,
+        proximas_acciones,
+        actualizado_en,
+        responsable:usuarios(nombre_completo)
+      `)
+      .eq('organizacion_id', organizacionId)
+      .order('actualizado_en', { ascending: false });
+
+    if (error) throw error;
+
+    return res.status(200).json({ expedientes: data || [] });
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+// ENDPOINT: Procesar Notificación Judicial con Gemini
 app.post('/api/procesar-providencia', async (req, res) => {
   try {
     const { textoNotificacion, organizacionId } = req.body;
 
     if (!textoNotificacion || !organizacionId) {
-      return res.status(400).json({ error: 'Faltan parámetros obligatorios (textoNotificacion o organizacionId).' });
+      return res.status(400).json({ error: 'Faltan parámetros obligatorios.' });
     }
 
-    // 1. Extraer datos con Gemini Flash usando responseSchema estricto
+    if (!GEMINI_API_KEY) return res.status(500).json({ error: 'Falta GEMINI_API_KEY.' });
+    if (!supabase) return res.status(500).json({ error: 'Base de datos no conectada.' });
+
     const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${GEMINI_API_KEY}`;
     
     const geminiPayload = {
@@ -65,7 +107,7 @@ app.post('/api/procesar-providencia', async (req, res) => {
 
     const datosExtraidos = JSON.parse(jsonIa.candidates[0].content.parts[0].text);
 
-    // 2. Buscar si el proceso ya existe en la base de datos de esta firma
+    // Búsqueda de coincidencias
     let coincidencias = [];
     const soloDigitos = (datosExtraidos.numProceso || '').replace(/\D/g, '');
 
@@ -83,7 +125,7 @@ app.post('/api/procesar-providencia', async (req, res) => {
       }
     }
 
-    // 3. Obtener listas de partes y responsables del despacho
+    // Listas de partes y responsables
     const { data: listaExpedientes } = await supabase
       .from('expedientes')
       .select('cliente, contraparte')
@@ -114,13 +156,15 @@ app.post('/api/procesar-providencia', async (req, res) => {
   }
 });
 
-// ENDPOINT SECUNDARIO: Guardar o actualizar expediente
+// ENDPOINT: Guardar o actualizar expediente
 app.post('/api/guardar-expediente', async (req, res) => {
   try {
+    if (!supabase) return res.status(500).json({ error: 'Base de datos no configurada.' });
+
     const { expedienteId, organizacionId, materia, numProceso, cliente, contraparte, tipoProceso, estado, proximasAcciones, responsableId } = req.body;
 
     if (expedienteId) {
-      const { data, error } = await supabase
+      const { error } = await supabase
         .from('expedientes')
         .update({
           materia,
@@ -138,7 +182,7 @@ app.post('/api/guardar-expediente', async (req, res) => {
       if (error) throw error;
       return res.status(200).json({ mensaje: 'Expediente actualizado exitosamente.' });
     } else {
-      const { data, error } = await supabase
+      const { error } = await supabase
         .from('expedientes')
         .insert([{
           organizacion_id: organizacionId,
@@ -160,5 +204,7 @@ app.post('/api/guardar-expediente', async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Servidor escuchando en el puerto ${PORT}`));
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Servidor escuchando en el puerto ${PORT}`);
+});
