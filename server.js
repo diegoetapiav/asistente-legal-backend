@@ -60,15 +60,36 @@ app.get('/api/listar-expedientes', async (req, res) => {
   }
 });
 
-// ENDPOINT ULTRA-RÁPIDO: Procesar Providencia con Gemini (< 5 segundos)
-app.post('/api/procesar-providencia', async (req, res) => {
-  try {
-    const { textoNotificacion, organizacionId, organizacion_id } = req.body;
-    const orgId = organizacionId || organizacion_id;
+// 2. Modelos gratuitos y de alta velocidad (NUNCA usar modelos Pro en Free Tier)
+    const modelosGratuitos = ['gemini-3.8-flash', 'gemini-2.0-flash', 'gemini-2.5-flash-lite'];
+    let jsonIa = null;
 
-    if (!textoNotificacion || !orgId) {
-      return res.status(400).json({ error: 'Faltan parámetros obligatorios.' });
+    for (const modelo of modelosGratuitos) {
+      try {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent?key=${GEMINI_API_KEY}`;
+        const resp = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(geminiPayload)
+        });
+
+        const data = await resp.json();
+
+        if (data.candidates?.[0]?.content?.parts?.[0]?.text) {
+          jsonIa = data;
+          break; // Éxito inmediato
+        }
+        console.warn(`Aviso: ${modelo} sin respuesta válida, probando siguiente modelo...`, data.error?.message);
+      } catch (errLoop) {
+        console.warn(`Error de red con ${modelo}:`, errLoop.message);
+      }
     }
+
+    if (!jsonIa || !jsonIa.candidates?.[0]?.content?.parts?.[0]?.text) {
+      throw new Error("No fue posible analizar la providencia con el modelo Flash gratuito. Reintente en unos segundos.");
+    }
+
+    const datosExtraidos = JSON.parse(jsonIa.candidates[0].content.parts[0].text);
 
     if (!GEMINI_API_KEY) return res.status(500).json({ error: 'Falta GEMINI_API_KEY.' });
     if (!supabase) return res.status(500).json({ error: 'Base de datos no conectada.' });
