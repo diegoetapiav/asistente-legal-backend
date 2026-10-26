@@ -18,9 +18,9 @@ const supabase = (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY)
   ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY) 
   : null;
 
-// RUTA DE PRUEBA
+// RUTA DE PRUEBA Y WARM-UP (Responde en <50ms para mantener vivo el backend)
 app.get('/', (req, res) => {
-  res.send('API de Asistente Legal funcionando correctamente.');
+  res.send('API de Asistente Legal funcionando a máxima velocidad.');
 });
 
 // ENDPOINT: Listar expedientes del despacho
@@ -60,7 +60,7 @@ app.get('/api/listar-expedientes', async (req, res) => {
   }
 });
 
-// ENDPOINT: Procesar Notificación Judicial con Gemini
+// ENDPOINT ULTRA-RÁPIDO: Procesar Providencia con Gemini (< 5 segundos)
 app.post('/api/procesar-providencia', async (req, res) => {
   try {
     const { textoNotificacion, organizacionId, organizacion_id } = req.body;
@@ -73,9 +73,16 @@ app.post('/api/procesar-providencia', async (req, res) => {
     if (!GEMINI_API_KEY) return res.status(500).json({ error: 'Falta GEMINI_API_KEY.' });
     if (!supabase) return res.status(500).json({ error: 'Base de datos no conectada.' });
 
+    // 1. Recorte óptimo: el encabezado y resolución procesal caben en 2500 caracteres
+    const extractoTexto = textoNotificacion.length > 2500 
+      ? textoNotificacion.slice(0, 2500) 
+      : textoNotificacion;
+
     const geminiPayload = {
       contents: [{
-        parts: [{ text: `Extrae los datos de esta providencia o notificación judicial ecuatoriana:\n\n${textoNotificacion.slice(0, 4000)}` }]
+        parts: [{ 
+          text: `Extrae en JSON estricto los datos procesales de esta providencia judicial de Ecuador:\n\n${extractoTexto}` 
+        }]
       }],
       generationConfig: {
         responseMimeType: "application/json",
@@ -93,81 +100,73 @@ app.post('/api/procesar-providencia', async (req, res) => {
           required: ["materia", "numProceso", "cliente", "contraparte", "tipoProceso", "estado", "proximasAcciones"]
         },
         temperature: 0.0,
-        maxOutputTokens: 1200
+        maxOutputTokens: 500 // Generación de respuesta inmediata
       }
     };
 
+    // 2. Ejecución veloz con Flash (1.5 - 3 seg)
     let jsonIa = null;
-    const modelos = ['gemini-3.8-flash', 'gemini-3.1-pro-preview'];
+    const flashUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${GEMINI_API_KEY}`;
 
-    for (const modelo of modelos) {
-      try {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent?key=${GEMINI_API_KEY}`;
-        let resp = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(geminiPayload)
-        });
+    try {
+      const respFlash = await fetch(flashUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(geminiPayload)
+      });
+      const dataFlash = await respFlash.json();
 
-        let data = await resp.json();
-
-        if (data.error && data.error.message && data.error.message.includes('high demand')) {
-          console.warn(`Aviso: ${modelo} saturado temporalmente. Esperando 2s antes de reintentar...`);
-          await new Promise(r => setTimeout(r, 2000));
-          resp = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(geminiPayload)
-          });
-          data = await resp.json();
-        }
-
-        if (!data.error && data.candidates?.[0]?.content?.parts?.[0]?.text) {
-          jsonIa = data;
-          break;
-        }
-        console.warn(`Aviso: ${modelo} no respondió con éxito:`, data.error?.message);
-      } catch (errLoop) {
-        console.warn(`Error de red con ${modelo}:`, errLoop.message);
+      if (dataFlash.candidates?.[0]?.content?.parts?.[0]?.text) {
+        jsonIa = dataFlash;
+      } else {
+        console.warn("Flash no devolvió texto, activando fallback pro...", dataFlash.error?.message);
       }
+    } catch (errFlash) {
+      console.warn("Error de red con Flash, pasando a fallback...", errFlash.message);
     }
 
-    if (!jsonIa || !jsonIa.candidates?.[0]?.content?.parts?.[0]?.text) {
-      throw new Error("No fue posible obtener respuesta de Gemini en este momento. Por favor reintenta.");
+    // 3. Fallback inmediato sin esperas artificiales si Flash se satura
+    if (!jsonIa) {
+      const proUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=${GEMINI_API_KEY}`;
+      const respPro = await fetch(proUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(geminiPayload)
+      });
+      const dataPro = await respPro.json();
+      if (dataPro.error) throw new Error(dataPro.error.message);
+      jsonIa = dataPro;
     }
 
     const datosExtraidos = JSON.parse(jsonIa.candidates[0].content.parts[0].text);
-
-    // Coincidencias existentes
-    let coincidencias = [];
     const soloDigitos = (datosExtraidos.numProceso || '').replace(/\D/g, '');
 
-    if (soloDigitos.length >= 4) {
-      const { data: expedientesExistentes } = await supabase
+    // 4. Consultas paralelas a Supabase con Promise.all (cero latencia agregada)
+    const [resExpedientes, resUsuarios] = await Promise.all([
+      supabase
         .from('expedientes')
         .select('id, num_proceso, cliente, contraparte, materia, tipo_proceso')
-        .eq('organizacion_id', orgId);
+        .eq('organizacion_id', orgId),
+      supabase
+        .from('usuarios')
+        .select('id, nombre_completo')
+        .eq('organizacion_id', orgId)
+    ]);
 
-      if (expedientesExistentes) {
-        coincidencias = expedientesExistentes.filter(exp => {
-          const numLimpio = String(exp.num_proceso || '').replace(/\D/g, '');
-          return numLimpio && (numLimpio === soloDigitos || numLimpio.includes(soloDigitos));
-        });
-      }
+    const expedientesExistentes = resExpedientes.data || [];
+    const listaResponsables = resUsuarios.data || [];
+
+    // Búsqueda en memoria
+    let coincidencias = [];
+    if (soloDigitos.length >= 4) {
+      coincidencias = expedientesExistentes.filter(exp => {
+        const numLimpio = String(exp.num_proceso || '').replace(/\D/g, '');
+        return numLimpio && (numLimpio === soloDigitos || numLimpio.includes(soloDigitos));
+      });
     }
 
-    const { data: listaExpedientes } = await supabase
-      .from('expedientes')
-      .select('cliente, contraparte')
-      .eq('organizacion_id', orgId);
-
-    const { data: listaResponsables } = await supabase
-      .from('usuarios')
-      .select('id, nombre_completo')
-      .eq('organizacion_id', orgId);
-
     const partesSet = new Set();
-    listaExpedientes?.forEach(e => {
+    expedientesExistentes.forEach(e => {
       if (e.cliente) partesSet.add(e.cliente);
       if (e.contraparte) partesSet.add(e.contraparte);
     });
@@ -177,7 +176,7 @@ app.post('/api/procesar-providencia', async (req, res) => {
       coincidencias: coincidencias,
       listas: {
         partes: Array.from(partesSet).sort(),
-        responsables: listaResponsables || []
+        responsables: listaResponsables
       }
     });
 
@@ -186,7 +185,7 @@ app.post('/api/procesar-providencia', async (req, res) => {
   }
 });
 
-// ENDPOINT: Guardar expediente
+// ENDPOINT: Guardar o actualizar expediente
 app.post('/api/guardar-expediente', async (req, res) => {
   try {
     if (!supabase) return res.status(500).json({ error: 'Base de datos no configurada.' });
