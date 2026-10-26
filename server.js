@@ -18,19 +18,19 @@ const supabase = (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY)
   ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY) 
   : null;
 
-// RUTA DE PRUEBA Y WARM-UP (Responde en <50ms para mantener vivo el backend)
+// RUTA DE PRUEBA Y SALUD
 app.get('/', (req, res) => {
-  res.send('API de Asistente Legal funcionando a máxima velocidad.');
+  res.send('API de Asistente Legal funcionando a maxima velocidad.');
 });
 
-// ENDPOINT: Listar expedientes del despacho
+// ENDPOINT: Listar expedientes
 app.get('/api/listar-expedientes', async (req, res) => {
   try {
     const { organizacionId, organizacion_id } = req.query;
     const orgId = organizacionId || organizacion_id;
 
     if (!orgId) {
-      return res.status(400).json({ error: 'Falta el parámetro organizacionId.' });
+      return res.status(400).json({ error: 'Falta el parametro organizacionId.' });
     }
 
     if (!supabase) return res.status(500).json({ error: 'Base de datos no conectada.' });
@@ -60,49 +60,28 @@ app.get('/api/listar-expedientes', async (req, res) => {
   }
 });
 
-// 2. Modelos gratuitos y de alta velocidad (NUNCA usar modelos Pro en Free Tier)
-    const modelosGratuitos = ['gemini-3.8-flash', 'gemini-2.0-flash', 'gemini-2.5-flash-lite'];
-    let jsonIa = null;
+// ENDPOINT: Extraccion con IA (< 5s garantizados sin modelos Pro)
+app.post('/api/procesar-providencia', async (req, res) => {
+  try {
+    const { textoNotificacion, organizacionId, organizacion_id } = req.body;
+    const orgId = organizacionId || organizacion_id;
 
-    for (const modelo of modelosGratuitos) {
-      try {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent?key=${GEMINI_API_KEY}`;
-        const resp = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(geminiPayload)
-        });
-
-        const data = await resp.json();
-
-        if (data.candidates?.[0]?.content?.parts?.[0]?.text) {
-          jsonIa = data;
-          break; // Éxito inmediato
-        }
-        console.warn(`Aviso: ${modelo} sin respuesta válida, probando siguiente modelo...`, data.error?.message);
-      } catch (errLoop) {
-        console.warn(`Error de red con ${modelo}:`, errLoop.message);
-      }
+    if (!textoNotificacion || !orgId) {
+      return res.status(400).json({ error: 'Faltan parametros obligatorios.' });
     }
-
-    if (!jsonIa || !jsonIa.candidates?.[0]?.content?.parts?.[0]?.text) {
-      throw new Error("No fue posible analizar la providencia con el modelo Flash gratuito. Reintente en unos segundos.");
-    }
-
-    const datosExtraidos = JSON.parse(jsonIa.candidates[0].content.parts[0].text);
 
     if (!GEMINI_API_KEY) return res.status(500).json({ error: 'Falta GEMINI_API_KEY.' });
     if (!supabase) return res.status(500).json({ error: 'Base de datos no conectada.' });
 
-    // 1. Recorte óptimo: el encabezado y resolución procesal caben en 2500 caracteres
-    const extractoTexto = textoNotificacion.length > 2500 
+    // Recorte a 2500 caracteres para agilizar la respuesta
+    const textoLimpio = textoNotificacion.length > 2500 
       ? textoNotificacion.slice(0, 2500) 
       : textoNotificacion;
 
     const geminiPayload = {
       contents: [{
         parts: [{ 
-          text: `Extrae en JSON estricto los datos procesales de esta providencia judicial de Ecuador:\n\n${extractoTexto}` 
+          text: `Extrae en JSON los datos procesales de esta providencia judicial de Ecuador:\n\n${textoLimpio}` 
         }]
       }],
       generationConfig: {
@@ -121,48 +100,43 @@ app.get('/api/listar-expedientes', async (req, res) => {
           required: ["materia", "numProceso", "cliente", "contraparte", "tipoProceso", "estado", "proximasAcciones"]
         },
         temperature: 0.0,
-        maxOutputTokens: 500 // Generación de respuesta inmediata
+        maxOutputTokens: 600
       }
     };
 
-    // 2. Ejecución veloz con Flash (1.5 - 3 seg)
+    // Unicamente modelos Flash con cuota libre y alta velocidad
+    const modelosFlash = ['gemini-3.8-flash', 'gemini-2.0-flash', 'gemini-2.5-flash-lite'];
     let jsonIa = null;
-    const flashUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${GEMINI_API_KEY}`;
 
-    try {
-      const respFlash = await fetch(flashUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(geminiPayload)
-      });
-      const dataFlash = await respFlash.json();
+    for (const mod of modelosFlash) {
+      try {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${mod}:generateContent?key=${GEMINI_API_KEY}`;
+        const resp = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(geminiPayload)
+        });
 
-      if (dataFlash.candidates?.[0]?.content?.parts?.[0]?.text) {
-        jsonIa = dataFlash;
-      } else {
-        console.warn("Flash no devolvió texto, activando fallback pro...", dataFlash.error?.message);
+        const data = await resp.json();
+
+        if (data.candidates?.[0]?.content?.parts?.[0]?.text) {
+          jsonIa = data;
+          break;
+        }
+        console.warn(`Aviso: ${mod} sin respuesta valida:`, data.error?.message);
+      } catch (errMod) {
+        console.warn(`Error de red con ${mod}:`, errMod.message);
       }
-    } catch (errFlash) {
-      console.warn("Error de red con Flash, pasando a fallback...", errFlash.message);
     }
 
-    // 3. Fallback inmediato sin esperas artificiales si Flash se satura
-    if (!jsonIa) {
-      const proUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=${GEMINI_API_KEY}`;
-      const respPro = await fetch(proUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(geminiPayload)
-      });
-      const dataPro = await respPro.json();
-      if (dataPro.error) throw new Error(dataPro.error.message);
-      jsonIa = dataPro;
+    if (!jsonIa || !jsonIa.candidates?.[0]?.content?.parts?.[0]?.text) {
+      throw new Error("No fue posible extraer los datos de la providencia con el motor Flash. Intente nuevamente.");
     }
 
     const datosExtraidos = JSON.parse(jsonIa.candidates[0].content.parts[0].text);
     const soloDigitos = (datosExtraidos.numProceso || '').replace(/\D/g, '');
 
-    // 4. Consultas paralelas a Supabase con Promise.all (cero latencia agregada)
+    // Consultas concurrentes en paralelo a Supabase
     const [resExpedientes, resUsuarios] = await Promise.all([
       supabase
         .from('expedientes')
@@ -177,7 +151,6 @@ app.get('/api/listar-expedientes', async (req, res) => {
     const expedientesExistentes = resExpedientes.data || [];
     const listaResponsables = resUsuarios.data || [];
 
-    // Búsqueda en memoria
     let coincidencias = [];
     if (soloDigitos.length >= 4) {
       coincidencias = expedientesExistentes.filter(exp => {
@@ -206,7 +179,7 @@ app.get('/api/listar-expedientes', async (req, res) => {
   }
 });
 
-// ENDPOINT: Guardar o actualizar expediente
+// ENDPOINT: Guardar expediente
 app.post('/api/guardar-expediente', async (req, res) => {
   try {
     if (!supabase) return res.status(500).json({ error: 'Base de datos no configurada.' });
